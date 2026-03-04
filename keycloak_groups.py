@@ -15,7 +15,7 @@ import json
 import os
 import re
 import sys
-from typing import NoReturn, Optional
+from typing import Any, NoReturn, Optional
 
 try:
     import requests
@@ -118,7 +118,7 @@ def write_json(path: str, data: dict) -> None:
     print(c(f"  Wrote: {path}", CYAN))
 
 
-def read_json(path: str) -> dict:
+def read_json(path: str) -> Any:
     try:
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)
@@ -134,7 +134,7 @@ def read_json(path: str) -> dict:
 
 def get_token(base_url: str, realm: str, client_id: str, client_secret: str,
               timeout: int, verify: bool) -> str:
-    url = f"{base_url.rstrip('/')}/realms/{realm}/protocol/openid-connect/token"
+    url = f"{base_url}/realms/{realm}/protocol/openid-connect/token"
     resp = requests.post(
         url,
         data={
@@ -156,7 +156,7 @@ def get_token(base_url: str, realm: str, client_id: str, client_secret: str,
 def fetch_top_level_groups(base_url: str, realm: str, token: str,
                             timeout: int, verify: bool) -> list:
     """Fetch all top-level groups (brief representation) using pagination."""
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/groups"
+    url = f"{base_url}/admin/realms/{realm}/groups"
     headers = {"Authorization": f"Bearer {token}"}
     groups = []
     page_size = 100
@@ -183,7 +183,7 @@ def fetch_top_level_groups(base_url: str, realm: str, token: str,
 def fetch_group_by_id(base_url: str, realm: str, token: str,
                       group_id: str, timeout: int, verify: bool) -> dict:
     """Fetch full group representation by Keycloak UUID."""
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/groups/{group_id}"
+    url = f"{base_url}/admin/realms/{realm}/groups/{group_id}"
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers, timeout=timeout, verify=verify)
     resp.raise_for_status()
@@ -193,7 +193,7 @@ def fetch_group_by_id(base_url: str, realm: str, token: str,
 def fetch_group_members_paged(base_url: str, realm: str, token: str,
                                group_id: str, timeout: int, verify: bool) -> list:
     """Fetch all members of a group using pagination."""
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/groups/{group_id}/members"
+    url = f"{base_url}/admin/realms/{realm}/groups/{group_id}/members"
     headers = {"Authorization": f"Bearer {token}"}
     members = []
     page_size = 100
@@ -299,8 +299,24 @@ def apply_group_filters(group: dict, args: argparse.Namespace) -> Optional[dict]
     member_count = len(group.get("members", []))
     name = group.get("name", "")
 
+    # --- Member count filters (independent AND conditions) ---
+    if min_members is not None and member_count < min_members:
+        filtered_subs = _filter_subgroups(group.get("subGroups", []), args)
+        if filtered_subs:
+            result = dict(group)
+            result["subGroups"] = filtered_subs
+            return result
+        return None
+    if max_members is not None and member_count > max_members:
+        filtered_subs = _filter_subgroups(group.get("subGroups", []), args)
+        if filtered_subs:
+            result = dict(group)
+            result["subGroups"] = filtered_subs
+            return result
+        return None
+
     # --- Include filters (any match passes; no filters = all pass) ---
-    has_any_include = bool(include_attrs or include_names or min_members is not None)
+    has_any_include = bool(include_attrs or include_names)
     passes_include = True
     if has_any_include:
         passes_include = False
@@ -314,9 +330,6 @@ def apply_group_filters(group: dict, args: argparse.Namespace) -> Optional[dict]
                 if name == n:
                     passes_include = True
                     break
-        if not passes_include and min_members is not None:
-            if member_count >= min_members:
-                passes_include = True
 
     if not passes_include:
         # This node doesn't match, but its children may — recurse
@@ -339,9 +352,6 @@ def apply_group_filters(group: dict, args: argparse.Namespace) -> Optional[dict]
             if name == n:
                 excluded = True
                 break
-    if not excluded and max_members is not None:
-        if member_count > max_members:
-            excluded = True
 
     if excluded:
         filtered_subs = _filter_subgroups(group.get("subGroups", []), args)
@@ -382,7 +392,7 @@ def count_groups_in_tree(groups: list) -> int:
 def find_group_by_path(base_url: str, realm: str, token: str,
                        path: str, timeout: int, verify: bool) -> Optional[dict]:
     """Return group dict if a group at the given path exists, else None."""
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/group-by-path/{path.lstrip('/')}"
+    url = f"{base_url}/admin/realms/{realm}/group-by-path/{path.lstrip('/')}"
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers, timeout=timeout, verify=verify)
     if resp.status_code == 404:
@@ -391,10 +401,19 @@ def find_group_by_path(base_url: str, realm: str, token: str,
     return resp.json()
 
 
+def _extract_id_from_location(resp: requests.Response, label: str) -> str:
+    """Extract the resource ID from a Location header, or die with a clear message."""
+    location = resp.headers.get("Location", "")
+    if not location:
+        die(f"Keycloak did not return a Location header when creating {label} "
+            f"(HTTP {resp.status_code})")
+    return location.rstrip("/").rsplit("/", 1)[-1]
+
+
 def create_top_level_group(base_url: str, realm: str, token: str,
                             group_data: dict, timeout: int, verify: bool) -> str:
     """Create a top-level group and return its new Keycloak ID."""
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/groups"
+    url = f"{base_url}/admin/realms/{realm}/groups"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type":  "application/json",
@@ -402,15 +421,14 @@ def create_top_level_group(base_url: str, realm: str, token: str,
     resp = requests.post(url, json=group_data, headers=headers,
                          timeout=timeout, verify=verify)
     resp.raise_for_status()
-    location = resp.headers.get("Location", "")
-    return location.rstrip("/").rsplit("/", 1)[-1]
+    return _extract_id_from_location(resp, f"group {group_data.get('name', '?')!r}")
 
 
 def create_child_group(base_url: str, realm: str, token: str,
                        parent_id: str, group_data: dict,
                        timeout: int, verify: bool) -> str:
     """Create a child group under parent_id and return its new Keycloak ID."""
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/groups/{parent_id}/children"
+    url = f"{base_url}/admin/realms/{realm}/groups/{parent_id}/children"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type":  "application/json",
@@ -418,14 +436,13 @@ def create_child_group(base_url: str, realm: str, token: str,
     resp = requests.post(url, json=group_data, headers=headers,
                          timeout=timeout, verify=verify)
     resp.raise_for_status()
-    location = resp.headers.get("Location", "")
-    return location.rstrip("/").rsplit("/", 1)[-1]
+    return _extract_id_from_location(resp, f"child group {group_data.get('name', '?')!r}")
 
 
 def update_group(base_url: str, realm: str, token: str,
                  group_id: str, group_data: dict,
                  timeout: int, verify: bool) -> None:
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/groups/{group_id}"
+    url = f"{base_url}/admin/realms/{realm}/groups/{group_id}"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type":  "application/json",
@@ -438,7 +455,7 @@ def update_group(base_url: str, realm: str, token: str,
 def find_user_by_username(base_url: str, realm: str, token: str,
                           username: str, timeout: int, verify: bool) -> Optional[dict]:
     """Return user dict if username exists in realm, else None."""
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/users"
+    url = f"{base_url}/admin/realms/{realm}/users"
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(
         url,
@@ -455,7 +472,7 @@ def find_user_by_username(base_url: str, realm: str, token: str,
 def add_user_to_group(base_url: str, realm: str, token: str,
                       user_id: str, group_id: str,
                       timeout: int, verify: bool) -> None:
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/users/{user_id}/groups/{group_id}"
+    url = f"{base_url}/admin/realms/{realm}/users/{user_id}/groups/{group_id}"
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.put(url, headers=headers, timeout=timeout, verify=verify)
     resp.raise_for_status()
@@ -487,25 +504,25 @@ def flatten_group_tree(groups: list) -> list:
     for group in groups:
         path = group.get("path", "")
         result.append((path, group))
-        for child in group.get("subGroups", []):
-            result.extend(flatten_group_tree([child]))
+        result.extend(flatten_group_tree(group.get("subGroups", [])))
     return result
 
 
 def restore_members(group: dict, group_id: str,
                     base_url: str, realm: str, token: str,
                     timeout: int, verify: bool,
-                    dry_run: bool) -> tuple:
-    """Add members to a group. Returns (n_added, not_found_usernames)."""
+                    dry_run: bool, verify_members: bool = False) -> tuple:
+    """Add members to a group. Returns (n_added, not_found_usernames, n_failed)."""
     members = group.get("members", [])
     n_added = 0
+    n_failed = 0
     not_found = []
 
     for member in members:
         username = member.get("username", "")
         if not username:
             continue
-        if dry_run:
+        if dry_run and not verify_members:
             n_added += 1
             continue
         try:
@@ -515,13 +532,17 @@ def restore_members(group: dict, group_id: str,
                 not_found.append(username)
                 print(c(f"    member {username!r}: NOT FOUND in target realm", YELLOW))
                 continue
+            if dry_run:
+                n_added += 1
+                continue
             add_user_to_group(base_url, realm, token,
                               user["id"], group_id, timeout, verify)
             n_added += 1
         except requests.HTTPError as exc:
             print(c(f"    member {username!r}: FAILED: {exc}", RED))
+            n_failed += 1
 
-    return n_added, not_found
+    return n_added, not_found, n_failed
 
 
 # ---------------------------------------------------------------------------
@@ -602,6 +623,10 @@ Examples:
                    help="Attribute restoration mode (default: all)")
     p.add_argument("--skip-members", action="store_true",
                    help="Skip group membership restoration during restore")
+    p.add_argument("--verify-members", action="store_true",
+                   help="During --dry-run, verify each member exists in target realm "
+                        "(slower but accurate count). Without this flag, dry-run "
+                        "assumes all backup members exist (optimistic count).")
 
     # Attribute schema (backup and restore)
     p.add_argument("--attr-schema", dest="attr_schema", default=None,
@@ -654,6 +679,8 @@ def main() -> None:
     ]
     if missing:
         die("Missing required arguments (or env vars): " + "  ".join(missing))
+
+    args.base_url = args.base_url.rstrip("/")
 
     if args.insecure:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -790,7 +817,7 @@ def main() -> None:
         die("--attr-mode schema requires --attr-schema or --attrs")
 
     if args.dry_run:
-        print(c("DRY-RUN: No changes will be made to Keycloak.", YELLOW + BOLD))
+        print(c("DRY-RUN: No changes will be made to Keycloak.", YELLOW, BOLD))
         print()
 
     # Flatten group tree into DFS pre-order (parents before children)
@@ -802,6 +829,7 @@ def main() -> None:
     n_updated          = 0
     n_failed           = 0
     n_members_added    = 0
+    n_members_failed   = 0
     members_not_found: list = []
 
     # path → KC group ID (used to look up parent IDs for child creation)
@@ -836,12 +864,14 @@ def main() -> None:
                 n_skipped += 1
                 # Still restore members even for skipped groups
                 if not args.skip_members:
-                    added, not_found = restore_members(
+                    added, not_found, m_failed = restore_members(
                         group, existing_id,
                         args.base_url, args.realm, token,
                         args.timeout, verify, args.dry_run,
+                        args.verify_members,
                     )
                     n_members_added  += added
+                    n_members_failed += m_failed
                     members_not_found.extend(not_found)
                 continue
 
@@ -901,12 +931,14 @@ def main() -> None:
 
         # Restore members (for created/updated groups)
         if not args.skip_members and path in path_to_id:
-            added, not_found = restore_members(
+            added, not_found, m_failed = restore_members(
                 group, path_to_id[path],
                 args.base_url, args.realm, token,
                 args.timeout, verify, args.dry_run,
+                args.verify_members,
             )
             n_members_added   += added
+            n_members_failed  += m_failed
             members_not_found.extend(not_found)
 
     print()
@@ -916,7 +948,19 @@ def main() -> None:
         print(f"  Groups would update : {n_updated}  (--force)")
         print(f"  Groups skipped      : {n_skipped}  (already exist)")
         if not args.skip_members:
-            print(f"  Members would add   : {n_members_added}")
+            if args.verify_members:
+                print(f"  Members would add   : {n_members_added}  (verified)")
+                if members_not_found:
+                    print(c(
+                        f"  Members not found   : {len(members_not_found)} username(s) "
+                        f"not found in target realm",
+                        YELLOW,
+                    ))
+                    for u in members_not_found:
+                        print(c(f"    - {u}", DIM))
+            else:
+                print(f"  Members would add   : {n_members_added}  "
+                      f"(optimistic — use --verify-members for accurate count)")
     else:
         print(f"  Groups created  : {n_created}")
         print(f"  Groups updated  : {n_updated}  (--force)")
@@ -924,6 +968,8 @@ def main() -> None:
         print(f"  Groups failed   : {n_failed}")
         if not args.skip_members:
             print(f"  Members added   : {n_members_added}")
+            if n_members_failed:
+                print(f"  Members failed  : {n_members_failed}")
             if members_not_found:
                 print(c(
                     f"  Members not found : {len(members_not_found)} username(s) "
@@ -935,7 +981,7 @@ def main() -> None:
 
     print()
     if mode != "dryrun" and n_failed == 0:
-        print(c("All done.", GREEN + BOLD))
+        print(c("All done.", GREEN, BOLD))
 
 
 if __name__ == "__main__":

@@ -241,9 +241,14 @@ python keycloak_groups.py --in groups_myrealm_202401010900.json --force
 # Restore groups without re-assigning members
 python keycloak_groups.py --in groups_myrealm_202401010900.json --skip-members
 
-# Dry-run (no changes made)
+# Dry-run (no changes made — member count is optimistic)
 python keycloak_groups.py --in groups_myrealm_202401010900.json --dry-run
+
+# Dry-run with verified member lookups (slower but accurate count)
+python keycloak_groups.py --in groups_myrealm_202401010900.json --dry-run --verify-members
 ```
+
+> **Dry-run member counts:** By default, `--dry-run` reports an optimistic member count — it assumes all users from the backup exist in the target realm (fast, no API calls per member). Use `--verify-members` to look up each member in the target realm for an accurate count. This is slower (one API call per member) but will report which users are missing.
 
 #### Attribute Restore Modes
 

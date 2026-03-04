@@ -14,7 +14,7 @@ import json
 import os
 import re
 import sys
-from typing import NoReturn, Optional
+from typing import Any, NoReturn, Optional
 
 try:
     import requests
@@ -117,7 +117,7 @@ def write_json(path: str, data: dict) -> None:
     print(c(f"  Wrote: {path}", CYAN))
 
 
-def read_json(path: str) -> dict:
+def read_json(path: str) -> Any:
     try:
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)
@@ -133,7 +133,7 @@ def read_json(path: str) -> dict:
 
 def get_token(base_url: str, realm: str, client_id: str, client_secret: str,
               timeout: int, verify: bool) -> str:
-    url = f"{base_url.rstrip('/')}/realms/{realm}/protocol/openid-connect/token"
+    url = f"{base_url}/realms/{realm}/protocol/openid-connect/token"
     resp = requests.post(
         url,
         data={
@@ -155,7 +155,7 @@ def get_token(base_url: str, realm: str, client_id: str, client_secret: str,
 def fetch_all_users(base_url: str, realm: str, token: str,
                     timeout: int, verify: bool) -> list:
     """Fetch all users from Keycloak using pagination."""
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/users"
+    url = f"{base_url}/admin/realms/{realm}/users"
     headers = {"Authorization": f"Bearer {token}"}
     users = []
     page_size = 100
@@ -182,7 +182,7 @@ def fetch_all_users(base_url: str, realm: str, token: str,
 def fetch_federated_identities(base_url: str, realm: str, token: str,
                                 user_id: str, timeout: int, verify: bool) -> list:
     """Fetch federated identity links for a user."""
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/users/{user_id}/federated-identity"
+    url = f"{base_url}/admin/realms/{realm}/users/{user_id}/federated-identity"
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers, timeout=timeout, verify=verify)
     resp.raise_for_status()
@@ -192,7 +192,7 @@ def fetch_federated_identities(base_url: str, realm: str, token: str,
 def fetch_group_member_ids(base_url: str, realm: str, token: str,
                            group_path: str, timeout: int, verify: bool) -> set:
     """Return set of user IDs who are members of the group at the given path."""
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/group-by-path/{group_path.lstrip('/')}"
+    url = f"{base_url}/admin/realms/{realm}/group-by-path/{group_path.lstrip('/')}"
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers, timeout=timeout, verify=verify)
     if resp.status_code == 404:
@@ -200,7 +200,7 @@ def fetch_group_member_ids(base_url: str, realm: str, token: str,
     resp.raise_for_status()
     group_id = resp.json()["id"]
 
-    members_url = f"{base_url.rstrip('/')}/admin/realms/{realm}/groups/{group_id}/members"
+    members_url = f"{base_url}/admin/realms/{realm}/groups/{group_id}/members"
     members = []
     page_size = 100
     first = 0
@@ -329,7 +329,7 @@ def apply_user_filters(users: list, idp_map: dict, group_id_sets: dict,
 def find_user_by_username(base_url: str, realm: str, token: str,
                           username: str, timeout: int, verify: bool) -> Optional[dict]:
     """Return user dict if username exists in realm, else None."""
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/users"
+    url = f"{base_url}/admin/realms/{realm}/users"
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(
         url,
@@ -345,7 +345,7 @@ def find_user_by_username(base_url: str, realm: str, token: str,
 
 def create_user(base_url: str, realm: str, token: str,
                 user_data: dict, timeout: int, verify: bool) -> None:
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/users"
+    url = f"{base_url}/admin/realms/{realm}/users"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type":  "application/json",
@@ -357,7 +357,7 @@ def create_user(base_url: str, realm: str, token: str,
 
 def update_user(base_url: str, realm: str, token: str,
                 user_id: str, user_data: dict, timeout: int, verify: bool) -> None:
-    url = f"{base_url.rstrip('/')}/admin/realms/{realm}/users/{user_id}"
+    url = f"{base_url}/admin/realms/{realm}/users/{user_id}"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type":  "application/json",
@@ -522,6 +522,8 @@ def main() -> None:
     if missing:
         die("Missing required arguments (or env vars): " + "  ".join(missing))
 
+    args.base_url = args.base_url.rstrip("/")
+
     if args.insecure:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     verify = not args.insecure
@@ -670,7 +672,7 @@ def main() -> None:
         die("--attr-mode schema requires --attr-schema or --attrs")
 
     if args.dry_run:
-        print(c("DRY-RUN: No changes will be made to Keycloak.", YELLOW + BOLD))
+        print(c("DRY-RUN: No changes will be made to Keycloak.", YELLOW, BOLD))
         print()
 
     # Counters
@@ -741,6 +743,7 @@ def main() -> None:
         print(f"  Would create : {n_created}")
         print(f"  Would update : {n_updated}  (--force)")
         print(f"  Skipped      : {n_skipped}  (already exist)")
+        print(f"  Failed       : {n_failed}  (lookup errors)")
     else:
         print(f"  Created : {n_created}")
         print(f"  Updated : {n_updated}  (--force)")
@@ -759,7 +762,7 @@ def main() -> None:
 
     print()
     if mode != "dryrun" and n_failed == 0:
-        print(c("All done.", GREEN + BOLD))
+        print(c("All done.", GREEN, BOLD))
 
 
 if __name__ == "__main__":
