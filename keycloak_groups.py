@@ -282,6 +282,16 @@ def group_matches_attr(group: dict, key: str, value: Optional[str]) -> bool:
     return value in attr_values
 
 
+def _reject_or_passthrough(group: dict, args: argparse.Namespace) -> Optional[dict]:
+    """Reject this group node but pass through any matching children as a shell."""
+    filtered_subs = _filter_subgroups(group.get("subGroups", []), args)
+    if filtered_subs:
+        result = dict(group)
+        result["subGroups"] = filtered_subs
+        return result
+    return None
+
+
 def apply_group_filters(group: dict, args: argparse.Namespace) -> Optional[dict]:
     """Apply include/exclude filters to a single group node.
 
@@ -300,20 +310,9 @@ def apply_group_filters(group: dict, args: argparse.Namespace) -> Optional[dict]
     name = group.get("name", "")
 
     # --- Member count filters (independent AND conditions) ---
-    if min_members is not None and member_count < min_members:
-        filtered_subs = _filter_subgroups(group.get("subGroups", []), args)
-        if filtered_subs:
-            result = dict(group)
-            result["subGroups"] = filtered_subs
-            return result
-        return None
-    if max_members is not None and member_count > max_members:
-        filtered_subs = _filter_subgroups(group.get("subGroups", []), args)
-        if filtered_subs:
-            result = dict(group)
-            result["subGroups"] = filtered_subs
-            return result
-        return None
+    if ((min_members is not None and member_count < min_members) or
+            (max_members is not None and member_count > max_members)):
+        return _reject_or_passthrough(group, args)
 
     # --- Include filters (any match passes; no filters = all pass) ---
     has_any_include = bool(include_attrs or include_names)
@@ -332,13 +331,7 @@ def apply_group_filters(group: dict, args: argparse.Namespace) -> Optional[dict]
                     break
 
     if not passes_include:
-        # This node doesn't match, but its children may — recurse
-        filtered_subs = _filter_subgroups(group.get("subGroups", []), args)
-        if filtered_subs:
-            result = dict(group)
-            result["subGroups"] = filtered_subs
-            return result
-        return None
+        return _reject_or_passthrough(group, args)
 
     # --- Exclude filters (any match fails) ---
     excluded = False
@@ -354,12 +347,7 @@ def apply_group_filters(group: dict, args: argparse.Namespace) -> Optional[dict]
                 break
 
     if excluded:
-        filtered_subs = _filter_subgroups(group.get("subGroups", []), args)
-        if filtered_subs:
-            result = dict(group)
-            result["subGroups"] = filtered_subs
-            return result
-        return None
+        return _reject_or_passthrough(group, args)
 
     # Group passes — recurse into subGroups
     result = dict(group)
@@ -511,12 +499,19 @@ def flatten_group_tree(groups: list) -> list:
 def restore_members(group: dict, group_id: str,
                     base_url: str, realm: str, token: str,
                     timeout: int, verify: bool,
-                    dry_run: bool, verify_members: bool = False) -> tuple:
-    """Add members to a group. Returns (n_added, not_found_usernames, n_failed)."""
+                    dry_run: bool, verify_members: bool = False,
+                    user_cache: Optional[dict] = None) -> tuple:
+    """Add members to a group. Returns (n_added, not_found_usernames, n_failed).
+
+    user_cache: optional dict mapping username → user dict (or None for not-found).
+    Avoids redundant API lookups when the same user appears in multiple groups.
+    """
     members = group.get("members", [])
     n_added = 0
     n_failed = 0
     not_found = []
+
+    _SENTINEL = object()
 
     for member in members:
         username = member.get("username", "")
@@ -526,8 +521,15 @@ def restore_members(group: dict, group_id: str,
             n_added += 1
             continue
         try:
-            user = find_user_by_username(base_url, realm, token,
-                                         username, timeout, verify)
+            # Check cache first to avoid redundant API calls
+            cached = user_cache.get(username, _SENTINEL) if user_cache is not None else _SENTINEL
+            if cached is _SENTINEL:
+                user = find_user_by_username(base_url, realm, token,
+                                             username, timeout, verify)
+                if user_cache is not None:
+                    user_cache[username] = user
+            else:
+                user = cached
             if user is None:
                 not_found.append(username)
                 print(c(f"    member {username!r}: NOT FOUND in target realm", YELLOW))
@@ -816,6 +818,9 @@ def main() -> None:
     if attr_mode == "schema" and schema_keys is None:
         die("--attr-mode schema requires --attr-schema or --attrs")
 
+    if args.verify_members and not args.dry_run:
+        print(c("  Warning: --verify-members has no effect without --dry-run", YELLOW))
+
     if args.dry_run:
         print(c("DRY-RUN: No changes will be made to Keycloak.", YELLOW, BOLD))
         print()
@@ -831,6 +836,9 @@ def main() -> None:
     n_members_added    = 0
     n_members_failed   = 0
     members_not_found: list = []
+
+    # Cache username → user dict to avoid redundant API lookups across groups
+    user_cache: dict = {}
 
     # path → KC group ID (used to look up parent IDs for child creation)
     path_to_id: dict = {}
@@ -868,7 +876,7 @@ def main() -> None:
                         group, existing_id,
                         args.base_url, args.realm, token,
                         args.timeout, verify, args.dry_run,
-                        args.verify_members,
+                        args.verify_members, user_cache,
                     )
                     n_members_added  += added
                     n_members_failed += m_failed
@@ -935,7 +943,7 @@ def main() -> None:
                 group, path_to_id[path],
                 args.base_url, args.realm, token,
                 args.timeout, verify, args.dry_run,
-                args.verify_members,
+                args.verify_members, user_cache,
             )
             n_members_added   += added
             n_members_failed  += m_failed
